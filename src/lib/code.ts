@@ -1,6 +1,6 @@
 // Characters used to generate a 6-char code. Ambiguous characters
 // (O/0, I/1, etc.) are excluded for readability when shared verbally.
-const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789';
 
 export function generateCode(length = 6): string {
   const bytes = new Uint8Array(length);
@@ -13,7 +13,7 @@ export function generateCode(length = 6): string {
 }
 
 // Validates a code: exactly 6 chars from the allowed alphabet.
-export const CODE_REGEX = /^[A-Z2-9]{6}$/;
+export const CODE_REGEX = /^[A-Z0-9]{6}$/;
 
 export function isValidCode(code: string): boolean {
   return CODE_REGEX.test(code);
