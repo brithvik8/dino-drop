@@ -17,7 +17,8 @@ import {
   isValidSnippetCode,
   isValidFileCode,
   normalizeCode,
-  encodeFileRoute,
+  getCleanCode,
+  getFileSharingUrl,
 } from '@/lib/code';
 import {
   supabase,
@@ -123,7 +124,7 @@ export default function Home() {
 
       // Sanitize filename and create storage path
       const sanitizedName = sanitizeStorageFileName(file.name);
-      const cleanCode = code.replace(/[^A-Z0-9]/g, '');
+      const cleanCode = getCleanCode(code);
       const storagePath = `uploads/${cleanCode}/${sanitizedName}`;
 
       // 1. Upload original file bytes to private Supabase Storage bucket
@@ -156,12 +157,17 @@ export default function Home() {
         throw new Error(`Database record failed: ${dbError.message || 'Please check permissions.'}`);
       }
 
-      setUploadSuccess({
-        code,
-        fileName: file.name,
-        fileSize: file.size,
-      });
       setUploading(false);
+
+      // Navigate to user-facing file upload/result page: /f/#CODE
+      navigate(`/f/#${cleanCode}`, {
+        state: {
+          justUploaded: true,
+          fileName: file.name,
+          fileSize: file.size,
+          code,
+        },
+      });
     } catch (err) {
       const msg =
         err instanceof Error
@@ -183,13 +189,14 @@ export default function Home() {
       return;
     }
 
-    // If code begins with '$', it is a file sharing code
-    if (normalized.startsWith('$')) {
+    // If code begins with '#' or '$', it is a file sharing code
+    if (normalized.startsWith('#') || normalized.startsWith('$')) {
       if (!isValidFileCode(normalized)) {
-        setError('File sharing codes must be "$" followed by 6 to 12 alphanumeric characters (e.g. $ABC123).');
+        setError('File sharing codes must be 6 to 12 alphanumeric characters (e.g. $ABC123 or #ABC123).');
         return;
       }
-      navigate(`/f/${encodeFileRoute(normalized)}`);
+      const clean = getCleanCode(normalized);
+      navigate(`/f/#${clean}`);
       return;
     }
 
@@ -203,7 +210,8 @@ export default function Home() {
 
         const file = fileData as SharedFile | null;
         if (file) {
-          navigate(`/f/${encodeFileRoute(file.code || '$' + normalized)}`);
+          const clean = getCleanCode(file.code || normalized);
+          navigate(`/f/#${clean}`);
           return;
         }
       } catch {
@@ -228,7 +236,8 @@ export default function Home() {
   }
 
   async function handleCopyLink(code: string) {
-    const url = `${window.location.origin}/f/${encodeFileRoute(code)}`;
+    // Copied sharing link format: https://dinodrop.vercel.app/f/$CODE
+    const url = getFileSharingUrl(code);
     try {
       await navigator.clipboard.writeText(url);
       setCopiedLink(true);
@@ -360,7 +369,7 @@ export default function Home() {
 
             <div className="mt-3 flex items-center justify-between gap-2 pt-2">
               <Link
-                to={`/f/${encodeFileRoute(uploadSuccess.code)}`}
+                to={`/f/#${getCleanCode(uploadSuccess.code)}`}
                 className="inline-flex items-center gap-1 text-xs font-medium text-purple-400 transition hover:text-purple-300 hover:underline"
               >
                 Go to download page <ExternalLink className="h-3 w-3" />

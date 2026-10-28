@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, useLocation, Link } from 'react-router-dom';
 import {
   Download,
   Link as LinkIcon,
@@ -11,9 +11,15 @@ import {
   FileCode,
   FileImage,
   File as GenericFile,
+  Copy,
+  CheckCircle2,
 } from 'lucide-react';
 import { supabase, type SharedFile, STORAGE_BUCKET, formatFileSize } from '@/lib/supabase';
-import { decodeFileRoute, encodeFileRoute, isValidFileCode } from '@/lib/code';
+import {
+  extractFileCode,
+  getFileSharingUrl,
+  isValidFileCode,
+} from '@/lib/code';
 import { SpinosaurusLogo } from '@/components/SpinosaurusLogo';
 
 function getFileIcon(fileName: string) {
@@ -32,7 +38,11 @@ function getFileIcon(fileName: string) {
 
 export default function FileDownload() {
   const { code: rawCode } = useParams<{ code: string }>();
-  const code = decodeFileRoute(rawCode);
+  const location = useLocation();
+
+  // Extract canonical code ($ABC123) from route parameter (/f/:code) or URL hash (/f/#CODE)
+  const code = extractFileCode(rawCode, location.hash);
+  const isJustUploaded = Boolean((location.state as { justUploaded?: boolean })?.justUploaded);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -40,15 +50,19 @@ export default function FileDownload() {
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
 
   useEffect(() => {
     let active = true;
     async function load() {
       if (!code || !isValidFileCode(code)) {
-        setLoadError('Invalid code. File sharing codes start with "$" (e.g. $ABC123).');
+        setLoadError('Invalid code. File sharing codes are 6 to 12 alphanumeric characters (e.g. $ABC123 or #ABC123).');
         setLoading(false);
         return;
       }
+      setLoading(true);
+      setLoadError(null);
+
       const { data, error } = await supabase
         .rpc('get_shared_file', { p_code: code })
         .maybeSingle();
@@ -130,7 +144,8 @@ export default function FileDownload() {
   }
 
   async function handleCopyLink() {
-    const url = `${window.location.origin}/f/${encodeFileRoute(code)}`;
+    // Copied sharing link format: https://dinodrop.vercel.app/f/$CODE
+    const url = getFileSharingUrl(code);
     try {
       await navigator.clipboard.writeText(url);
       setCopiedLink(true);
@@ -148,6 +163,16 @@ export default function FileDownload() {
         setDownloadError('Could not copy link to clipboard.');
       }
       document.body.removeChild(input);
+    }
+  }
+
+  async function handleCopyCode() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedCode(true);
+      setTimeout(() => setCopiedCode(false), 2000);
+    } catch {
+      setDownloadError('Could not copy code to clipboard.');
     }
   }
 
@@ -187,7 +212,7 @@ export default function FileDownload() {
           <SpinosaurusLogo className="mb-6 h-20 w-20 opacity-50" />
           <h1 className="text-2xl font-bold">No file found</h1>
           <p className="mt-2 text-neutral-400">
-            No shared file exists for code <span className="font-mono font-bold text-white">{code}</span>.
+            No shared file exists for code <span className="font-mono font-bold text-white">{code || rawCode}</span>.
           </p>
           <Link
             to="/"
@@ -216,16 +241,46 @@ export default function FileDownload() {
           >
             <ArrowLeft className="h-4 w-4" /> Home
           </Link>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
             <span className="text-xs uppercase tracking-wider text-neutral-400">File Code:</span>
             <span className="font-mono text-lg font-semibold tracking-widest text-purple-300">
               {code}
             </span>
+            <button
+              type="button"
+              onClick={handleCopyCode}
+              className="inline-flex items-center gap-1 rounded border border-neutral-700 bg-neutral-900 px-2.5 py-1 text-xs text-neutral-300 transition hover:border-purple-400 hover:text-white"
+              title="Copy sharing code"
+            >
+              {copiedCode ? (
+                <>
+                  <Check className="h-3 w-3 text-purple-400" />
+                  Copied
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3 w-3 text-neutral-400" />
+                  Copy
+                </>
+              )}
+            </button>
           </div>
         </div>
       </header>
 
       <main className="mx-auto max-w-2xl px-6 py-12">
+        {isJustUploaded && (
+          <div className="mb-6 flex items-start gap-3 rounded-xl border border-purple-500/40 bg-purple-950/30 p-4 text-purple-200 shadow-lg">
+            <CheckCircle2 className="h-5 w-5 shrink-0 text-purple-400 mt-0.5" />
+            <div className="text-sm">
+              <div className="font-semibold text-white">Upload successful!</div>
+              <div className="text-xs text-neutral-300 mt-1">
+                Your file is ready to share. Click <strong className="text-purple-300">Copy Link</strong> to copy the sharing URL (<span className="font-mono text-purple-300">{getFileSharingUrl(code)}</span>).
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="rounded-xl border border-neutral-800 bg-[#111111] p-8 shadow-xl">
           <div className="flex items-start gap-5">
             <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-xl border border-purple-500/30 bg-purple-950/20">

@@ -11,6 +11,7 @@ function App() {
         <Route path="/" element={<Home />} />
         <Route path="/e/:code" element={<Editor />} />
         <Route path="/c/:code" element={<DinoClipboard />} />
+        <Route path="/f" element={<FileDownload />} />
         <Route path="/f/:code" element={<FileDownload />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
