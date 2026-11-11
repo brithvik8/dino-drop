@@ -1,4 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
+import {
+  getCanonicalFileCode,
+  getCleanCode,
+  generateFileCode,
+  isValidFileCode,
+} from './code';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
@@ -197,5 +203,131 @@ export function sanitizeStorageFileName(originalName: string): string {
   const ext = parts.length > 1 ? '.' + parts.pop()?.toLowerCase() : '';
   const base = parts.join('_').replace(/[^a-zA-Z0-9_-]/g, '_');
   return `${base || 'file'}${ext}`;
+}
+
+// Uploads a file to Supabase Storage and records its metadata in public.shared_files
+// Supports optional custom code (e.g. $MYDOC or MYDOC) or auto-generates if omitted
+export async function uploadSharedFile(
+  file: File,
+  customCode?: string
+): Promise<{ success: boolean; data?: SharedFile; error?: string }> {
+  // 1. Validate file size, extension, and MIME type
+  const validation = validateFileForUpload(file);
+  if (!validation.valid) {
+    return { success: false, error: validation.error || 'Invalid file.' };
+  }
+
+  let finalCode = '';
+
+  if (customCode && customCode.trim()) {
+    const canonical = getCanonicalFileCode(customCode);
+    if (!isValidFileCode(canonical)) {
+      return {
+        success: false,
+        error:
+          'Custom code must be 6 to 12 alphanumeric characters (e.g. $ABC123 or ABC123).',
+      };
+    }
+
+    // Check if code is already taken
+    const { data: existing, error: checkError } = await supabase
+      .rpc('get_shared_file', { p_code: canonical })
+      .maybeSingle();
+
+    if (checkError) {
+      return {
+        success: false,
+        error: `Could not verify code availability: ${checkError.message}`,
+      };
+    }
+
+    if (existing) {
+      return {
+        success: false,
+        error: `Code "${customCode.trim()}" is already in use. Please choose another code.`,
+      };
+    }
+
+    finalCode = canonical;
+  } else {
+    // Generate unique random code
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const candidate = generateFileCode(6);
+      const { data: existing } = await supabase
+        .rpc('get_shared_file', { p_code: candidate })
+        .maybeSingle();
+
+      if (!existing) {
+        finalCode = candidate;
+        break;
+      }
+    }
+
+    if (!finalCode) {
+      return {
+        success: false,
+        error: 'Could not generate a unique sharing code. Please try again.',
+      };
+    }
+  }
+
+  const sanitizedName = sanitizeStorageFileName(file.name);
+  const cleanCode = getCleanCode(finalCode);
+  const storagePath = `uploads/${cleanCode}/${sanitizedName}`;
+
+  // 2. Upload original file bytes to private Supabase Storage bucket
+  const { error: storageError } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .upload(storagePath, file, {
+      cacheControl: '3600',
+      upsert: false,
+      contentType: file.type || 'application/octet-stream',
+    });
+
+  if (storageError) {
+    return {
+      success: false,
+      error: `Upload to storage failed: ${storageError.message || 'Please verify the storage bucket exists.'}`,
+    };
+  }
+
+  // 3. Insert record into shared_files table
+  const { error: dbError } = await supabase.from('shared_files').insert({
+    code: finalCode,
+    file_name: file.name,
+    file_size: file.size,
+    file_type: file.type || 'application/octet-stream',
+    storage_path: storagePath,
+  });
+
+  if (dbError) {
+    // Clean up storage object if metadata insert failed
+    await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]);
+    if (dbError.code === '23505') {
+      return {
+        success: false,
+        error: `Code "${finalCode}" is already in use. Please choose another code.`,
+      };
+    }
+    return {
+      success: false,
+      error: `Database record failed: ${dbError.message || 'Please check permissions.'}`,
+    };
+  }
+
+  const sharedFile: SharedFile = {
+    id: '',
+    code: finalCode,
+    file_name: file.name,
+    file_size: file.size,
+    file_type: file.type || 'application/octet-stream',
+    storage_path: storagePath,
+    created_at: new Date().toISOString(),
+  };
+
+  return {
+    success: true,
+    data: sharedFile,
+  };
 }
 

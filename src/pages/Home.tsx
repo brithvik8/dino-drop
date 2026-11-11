@@ -10,10 +10,15 @@ import {
   ExternalLink,
   FileCheck,
   Loader2,
+  RefreshCw,
+  X,
+  FileText,
+  FileImage,
+  FileCode,
+  File as GenericFile,
 } from 'lucide-react';
 import {
   generateCode,
-  generateFileCode,
   isValidSnippetCode,
   isValidFileCode,
   normalizeCode,
@@ -22,13 +27,26 @@ import {
 } from '@/lib/code';
 import {
   supabase,
-  STORAGE_BUCKET,
   formatFileSize,
   validateFileForUpload,
-  sanitizeStorageFileName,
+  uploadSharedFile,
   type SharedFile,
 } from '@/lib/supabase';
 import { SpinosaurusLogo } from '@/components/SpinosaurusLogo';
+
+function getModalFileIcon(fileName: string) {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext)) {
+    return <FileImage className="h-6 w-6 text-purple-400" />;
+  }
+  if (ext === 'mdj') {
+    return <FileCode className="h-6 w-6 text-purple-400" />;
+  }
+  if (['pdf', 'doc', 'docx', 'txt', 'ppt', 'pptx', 'xls', 'xlsx'].includes(ext)) {
+    return <FileText className="h-6 w-6 text-purple-400" />;
+  }
+  return <GenericFile className="h-6 w-6 text-purple-400" />;
+}
 
 interface UploadSuccessInfo {
   code: string;
@@ -78,106 +96,85 @@ export default function Home() {
     }
   }
 
-  function handleUploadButtonClick() {
+  // Upload modal state with custom code support
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [modalFile, setModalFile] = useState<File | null>(null);
+  const [modalCustomCode, setModalCustomCode] = useState<string>('');
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [modalDragOver, setModalDragOver] = useState(false);
+  const modalFileInputRef = useRef<HTMLInputElement>(null);
+
+  function handleOpenUploadModal() {
     setError(null);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-      fileInputRef.current.click();
+    setModalError(null);
+    setModalFile(null);
+    if (codeInput.trim()) {
+      setModalCustomCode(getCleanCode(codeInput));
+    } else {
+      setModalCustomCode('');
     }
+    setIsUploadModalOpen(true);
   }
 
-  async function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    setError(null);
-
-    // Validate allowed file extensions, MIME types, and 50 MB limit
-    const validation = validateFileForUpload(file);
+  function handleModalFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setModalError(null);
+    const validation = validateFileForUpload(f);
     if (!validation.valid) {
-      setError(validation.error || 'Unsupported file.');
+      setModalError(validation.error || 'Unsupported file.');
+      return;
+    }
+    setModalFile(f);
+  }
+
+  function handleModalDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setModalDragOver(false);
+    const f = e.dataTransfer.files?.[0];
+    if (!f) return;
+    setModalError(null);
+    const validation = validateFileForUpload(f);
+    if (!validation.valid) {
+      setModalError(validation.error || 'Unsupported file.');
+      return;
+    }
+    setModalFile(f);
+  }
+
+  async function handleModalUpload() {
+    if (!modalFile) {
+      setModalError('Please select a file to upload.');
       return;
     }
 
     setUploading(true);
-    setUploadSuccess(null);
+    setModalError(null);
 
-    try {
-      let code = '';
-      for (let attempt = 0; attempt < 5; attempt++) {
-        // File sharing codes must start with a literal dollar sign (e.g. $ABC123)
-        const candidate = generateFileCode(6);
-        // Check uniqueness via get_shared_file RPC
-        const { data: existingFile } = await supabase
-          .rpc('get_shared_file', { p_code: candidate })
-          .maybeSingle();
+    const targetCode = modalCustomCode.trim()
+      ? '$' + modalCustomCode.trim().toUpperCase()
+      : undefined;
 
-        if (!existingFile) {
-          code = candidate;
-          break;
-        }
-      }
+    const res = await uploadSharedFile(modalFile, targetCode);
 
-      if (!code) {
-        throw new Error('Could not generate a unique sharing code. Please try again.');
-      }
-
-      // Sanitize filename and create storage path
-      const sanitizedName = sanitizeStorageFileName(file.name);
-      const cleanCode = getCleanCode(code);
-      const storagePath = `uploads/${cleanCode}/${sanitizedName}`;
-
-      // 1. Upload original file bytes to private Supabase Storage bucket
-      const { error: storageError } = await supabase.storage
-        .from(STORAGE_BUCKET)
-        .upload(storagePath, file, {
-          cacheControl: '3600',
-          upsert: false,
-          contentType: file.type || 'application/octet-stream',
-        });
-
-      if (storageError) {
-        throw new Error(
-          `Upload to storage failed: ${storageError.message || 'Please verify the storage bucket exists.'}`
-        );
-      }
-
-      // 2. Insert record into shared_files table
-      const { error: dbError } = await supabase.from('shared_files').insert({
-        code,
-        file_name: file.name,
-        file_size: file.size,
-        file_type: file.type || 'application/octet-stream',
-        storage_path: storagePath,
-      });
-
-      if (dbError) {
-        // Clean up storage object if metadata insert failed
-        await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]);
-        throw new Error(`Database record failed: ${dbError.message || 'Please check permissions.'}`);
-      }
-
+    if (!res.success || !res.data) {
+      setModalError(res.error || 'Upload failed.');
       setUploading(false);
-
-      // Navigate to user-facing file upload/result page: /f/#CODE
-      navigate(`/f/#${cleanCode}`, {
-        state: {
-          justUploaded: true,
-          fileName: file.name,
-          fileSize: file.size,
-          code,
-        },
-      });
-    } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : typeof err === 'object' && err !== null && 'message' in err
-          ? String((err as { message: unknown }).message)
-          : 'File upload failed. Please try again.';
-      setError(msg);
-      setUploading(false);
+      return;
     }
+
+    setUploading(false);
+    setIsUploadModalOpen(false);
+
+    const clean = getCleanCode(res.data.code);
+    navigate(`/f/#${clean}`, {
+      state: {
+        justUploaded: true,
+        fileName: modalFile.name,
+        fileSize: modalFile.size,
+        code: res.data.code,
+      },
+    });
   }
 
   async function handleOpenExisting(e: React.FormEvent) {
@@ -197,6 +194,12 @@ export default function Home() {
       }
       const clean = getCleanCode(normalized);
       navigate(`/f/#${clean}`);
+      return;
+    }
+
+    // If code has 7 to 12 alphanumeric characters, route directly as a file code
+    if (/^[A-Z0-9]{7,12}$/.test(normalized)) {
+      navigate(`/f/#${normalized}`);
       return;
     }
 
@@ -277,32 +280,13 @@ export default function Home() {
 
           <button
             type="button"
-            onClick={handleUploadButtonClick}
+            onClick={handleOpenUploadModal}
             disabled={creating || uploading}
             className="inline-flex items-center gap-2 rounded-lg border border-purple-500/60 bg-[#161616] px-6 py-3 text-base font-semibold text-white transition hover:border-purple-400 hover:bg-purple-950/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#800080] disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {uploading ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin text-purple-400" />
-                Uploading…
-              </>
-            ) : (
-              <>
-                <Upload className="h-4 w-4 text-purple-400" />
-                Upload File
-              </>
-            )}
+            <Upload className="h-4 w-4 text-purple-400" />
+            Upload File
           </button>
-
-          {/* Hidden file input restricted strictly to allowed documents and images up to 50 MB */}
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileSelected}
-            accept=".pdf,.doc,.docx,.txt,.ppt,.pptx,.xls,.xlsx,.mdj,.png,.jpg,.jpeg,.gif,.webp,.svg"
-            className="hidden"
-            aria-label="Upload documents or images up to 50 MB"
-          />
         </div>
 
         {/* Upload Success Card */}
@@ -409,6 +393,9 @@ export default function Home() {
               Open
             </button>
           </form>
+          <p className="mt-2 text-center text-xs text-neutral-500">
+            Tip: Use <span className="font-mono text-purple-400">$CODE</span> (e.g. <span className="font-mono text-purple-400">$MYFILE</span>) for files, or <span className="font-mono text-purple-400">CODE</span> for text notes.
+          </p>
         </div>
 
         {error && (
@@ -419,6 +406,170 @@ export default function Home() {
             <AlertCircle className="h-4 w-4 shrink-0" />
             {error}
           </p>
+        )}
+
+        {/* Upload File with Custom Code Modal */}
+        {isUploadModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+            <div className="relative w-full max-w-lg rounded-2xl border border-neutral-800 bg-[#111111] p-6 sm:p-8 shadow-2xl">
+              <button
+                type="button"
+                onClick={() => setIsUploadModalOpen(false)}
+                className="absolute right-4 top-4 rounded-lg p-1.5 text-neutral-400 hover:bg-neutral-800 hover:text-white transition"
+                aria-label="Close modal"
+              >
+                <X className="h-5 w-5" />
+              </button>
+
+              <div className="flex items-center gap-3 mb-2">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-purple-500/30 bg-purple-950/30 text-purple-400">
+                  <Upload className="h-5 w-5" />
+                </div>
+                <div>
+                  <h2 className="text-xl font-bold text-white">Upload File</h2>
+                  <p className="text-xs text-neutral-400">
+                    Documents and images up to 50 MB
+                  </p>
+                </div>
+              </div>
+
+              {/* Hidden file input */}
+              <input
+                type="file"
+                ref={modalFileInputRef}
+                onChange={handleModalFileSelected}
+                accept=".pdf,.doc,.docx,.txt,.ppt,.pptx,.xls,.xlsx,.mdj,.png,.jpg,.jpeg,.gif,.webp,.svg"
+                className="hidden"
+              />
+
+              {/* File Dropzone / Selected Preview */}
+              <div className="mt-5">
+                {modalFile ? (
+                  <div className="flex items-center justify-between rounded-xl border border-purple-500/40 bg-purple-950/20 p-4">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-purple-500/30 bg-black/60">
+                        {getModalFileIcon(modalFile.name)}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold text-white">
+                          {modalFile.name}
+                        </div>
+                        <div className="text-xs text-neutral-400">
+                          {formatFileSize(modalFile.size)}
+                        </div>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setModalFile(null);
+                        if (modalFileInputRef.current) modalFileInputRef.current.value = '';
+                      }}
+                      className="rounded-lg border border-neutral-700 bg-[#161616] px-3 py-1.5 text-xs font-medium text-neutral-300 hover:border-purple-400 hover:text-white transition"
+                    >
+                      Change
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      setModalDragOver(true);
+                    }}
+                    onDragLeave={() => setModalDragOver(false)}
+                    onDrop={handleModalDrop}
+                    onClick={() => modalFileInputRef.current?.click()}
+                    className={`cursor-pointer rounded-xl border-2 border-dashed p-6 text-center transition ${
+                      modalDragOver
+                        ? 'border-purple-400 bg-purple-950/30'
+                        : 'border-neutral-700 bg-neutral-900/30 hover:border-purple-500/60 hover:bg-neutral-900/60'
+                    }`}
+                  >
+                    <Upload className="mx-auto h-8 w-8 text-purple-400 mb-2" />
+                    <p className="text-sm font-medium text-white">
+                      Click to choose or drag and drop a file
+                    </p>
+                    <p className="mt-1 text-xs text-neutral-400">
+                      PDF, DOCX, TXT, PPTX, XLSX, PNG, JPG, GIF, SVG (up to 50 MB)
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              {/* Custom Code Input */}
+              <div className="mt-5">
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-semibold uppercase tracking-wider text-neutral-300">
+                    Custom Code (Optional)
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setModalCustomCode(generateCode(6))}
+                    className="inline-flex items-center gap-1 text-xs text-purple-400 hover:text-purple-300 transition"
+                  >
+                    <RefreshCw className="h-3 w-3" /> Randomize
+                  </button>
+                </div>
+                <div className="relative flex items-center">
+                  <span className="absolute inset-y-0 left-0 flex items-center pl-3.5 font-mono text-base font-bold text-purple-400 pointer-events-none select-none">
+                    $
+                  </span>
+                  <input
+                    type="text"
+                    value={modalCustomCode}
+                    onChange={(e) =>
+                      setModalCustomCode(
+                        e.target.value.replace(/[^a-zA-Z0-9]/g, '').toUpperCase()
+                      )
+                    }
+                    placeholder="AUTO-GENERATED IF BLANK"
+                    maxLength={12}
+                    className="w-full rounded-lg border border-neutral-700 bg-black/60 pl-8 pr-4 py-2.5 font-mono text-base uppercase tracking-widest text-white placeholder:font-sans placeholder:tracking-normal placeholder:text-neutral-600 focus:border-purple-500 focus:outline-none focus:ring-2 focus:ring-purple-500/40"
+                  />
+                </div>
+                <p className="mt-1 text-xs text-neutral-500">
+                  6 to 12 alphanumeric characters. Leave blank for an auto-generated code.
+                </p>
+              </div>
+
+              {modalError && (
+                <div className="mt-4 flex items-center gap-2 rounded-lg border border-red-900/60 bg-red-950/40 p-3 text-xs text-red-300">
+                  <AlertCircle className="h-4 w-4 shrink-0 text-red-400" />
+                  <span>{modalError}</span>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="mt-6 flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsUploadModalOpen(false)}
+                  disabled={uploading}
+                  className="rounded-lg border border-neutral-700 bg-[#161616] px-4 py-2.5 text-sm font-semibold text-neutral-300 hover:text-white transition disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleModalUpload}
+                  disabled={!modalFile || uploading}
+                  className="inline-flex items-center gap-2 rounded-lg bg-[#800080] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_4px_16px_rgba(128,0,128,0.25)] transition hover:bg-[#A020F0] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#A020F0] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {uploading ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Uploading…
+                    </>
+                  ) : (
+                    <>
+                      <Upload className="h-4 w-4" />
+                      Upload File {modalCustomCode ? `to $${modalCustomCode}` : ''}
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </main>
     </div>

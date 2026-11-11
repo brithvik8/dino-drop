@@ -4,15 +4,16 @@ A minimalist text-sharing site disguised as a browser offline dinosaur page. Sav
 
 ## Routes
 
-- `/` — Home: create a new text or open an existing code.
+- `/` — Home: create a new text, upload a file (with optional custom code), or open an existing code.
 - `/e/:code` — Editor for the text saved under `:code`. Creates the record on first save.
 - `/c/:code` — Dino clipboard page. Click the dinosaur to copy the saved text.
+- `/f/:code` — File page: download existing file or upload a document/image under a custom `:code` (creates the file on upload, just like the text editor).
 
 ## How it works
 
-- Codes are 6 characters from `A–Z` and `2–9` (ambiguous characters like `0`, `O`, `1`, `I` are excluded).
-- All text is stored in a Supabase `snippets` table, keyed by the code.
-- Anyone with a code can read **and edit** its text — see the security note below.
+- **Text Snippets**: Codes are 6 characters from `A–Z` and `2–9` (ambiguous characters like `0`, `O`, `1`, `I` are excluded). Stored in the Supabase `snippets` table.
+- **File Sharing**: Codes start with `$` (e.g. `$ABC123` or `$MYDOCS`), with 6 to 12 alphanumeric characters. Supports documents and images up to 50 MB, stored in a private Supabase Storage bucket with metadata in `shared_files`.
+- Custom codes can be chosen on the Home page upload modal, entered into the code search box, or visited directly at `/f/:code`.
 
 ## Local setup
 

@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { Check, Loader2, AlertTriangle, Home } from 'lucide-react';
-import { supabase } from '@/lib/supabase';
-import { isValidCode, normalizeCode } from '@/lib/code';
+import { supabase, type SharedFile } from '@/lib/supabase';
+import { isValidCode, normalizeCode, getFileSharingUrl, getCleanCode } from '@/lib/code';
 import { SpinosaurusLogo } from '@/components/SpinosaurusLogo';
 
 type State =
   | { kind: 'loading' }
   | { kind: 'notext' }
-  | { kind: 'ready'; content: string }
+  | { kind: 'ready'; content: string; isFile?: boolean; fileName?: string }
   | { kind: 'error'; message: string };
 
 export default function DinoClipboard() {
@@ -56,10 +56,28 @@ export default function DinoClipboard() {
         setState({ kind: 'error', message: 'Could not reach the database.' });
         return;
       }
-      if (!data || !data.content) {
-        setState({ kind: 'notext' });
+      if (data && data.content) {
+        setState({ kind: 'ready', content: data.content, isFile: false });
+        return;
+      }
+
+      // Check if this code belongs to a shared file
+      const { data: fileData, error: fileErr } = await supabase
+        .rpc('get_shared_file', { p_code: rawCode })
+        .maybeSingle();
+
+      if (!active) return;
+      if (!fileErr && fileData) {
+        const file = fileData as SharedFile;
+        const shareUrl = getFileSharingUrl(file.code);
+        setState({
+          kind: 'ready',
+          content: shareUrl,
+          isFile: true,
+          fileName: file.file_name,
+        });
       } else {
-        setState({ kind: 'ready', content: data.content });
+        setState({ kind: 'notext' });
       }
     }
     load();
@@ -83,10 +101,11 @@ export default function DinoClipboard() {
     setTimeout(() => setPressed(false), 180);
 
     const text = state.content;
+    const successMsg = state.isFile ? 'File link copied to clipboard!' : 'Copied to clipboard!';
     try {
       if (navigator.clipboard && window.isSecureContext) {
         await navigator.clipboard.writeText(text);
-        showToast('Copied to clipboard!');
+        showToast(successMsg);
         return;
       }
       if (fallbackRef.current) {
@@ -94,7 +113,7 @@ export default function DinoClipboard() {
         fallbackRef.current.select();
         const ok = document.execCommand('copy');
         if (ok) {
-          showToast('Copied to clipboard!');
+          showToast(successMsg);
           return;
         }
       }
